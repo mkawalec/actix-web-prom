@@ -216,15 +216,17 @@ use std::time::Instant;
 
 use actix_web::{
     dev::{
-        Body, BodySize, MessageBody, AnyBody, Service, ServiceRequest, ServiceResponse,
+        Service, ServiceRequest, ServiceResponse,
         Transform,
     },
-    http::{header::CONTENT_TYPE, HeaderValue, Method, StatusCode},
+    body::{BodySize, MessageBody, BoxBody},
+    http::{header::{CONTENT_TYPE, HeaderValue}, Method, StatusCode},
     web::Bytes,
     Error,
 };
 use futures::{
     future::{ok, Ready},
+    ready,
     task::{Context, Poll},
     Future,
 };
@@ -513,9 +515,9 @@ where
                     CONTENT_TYPE,
                     HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),
                 );
-                body = Body::new_boxed(inner.metrics());
+                body = BoxBody::new(inner.metrics());
             }
-            Body::new_boxed(StreamLog {
+            BoxBody::new(StreamLog {
                 body,
                 size: 0,
                 clock: time,
@@ -564,7 +566,7 @@ use std::marker::PhantomData;
 #[pin_project(PinnedDrop)]
 pub struct StreamLog {
     #[pin]
-    body: AnyBody,
+    body: BoxBody,
     size: usize,
     clock: Instant,
     inner: Arc<PrometheusMetrics>,
@@ -584,7 +586,7 @@ impl PinnedDrop for StreamLog {
 
 impl MessageBody for StreamLog
 {
-    type Error = actix_http::Error;
+    type Error = Error;
 
     fn size(&self) -> BodySize {
         self.body.size()
@@ -592,12 +594,13 @@ impl MessageBody for StreamLog
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Result<Bytes, Self::Error>>> {
         let this = self.project();
-        match MessageBody::poll_next(this.body, cx) {
-            Poll::Ready(Some(Ok(chunk))) => {
+        match ready!(this.body.poll_next(cx)) {
+            Some(Ok(chunk)) => {
                 *this.size += chunk.len();
                 Poll::Ready(Some(Ok(chunk)))
             }
-            val => val,
+            Some(Err(err)) => Poll::Ready(Some(Err(err.into()))),
+            None => Poll::Ready(None),
         }
     }
 }
